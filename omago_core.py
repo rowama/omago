@@ -326,9 +326,12 @@ def repo_status(path, verify=False):
     head = git(path, "rev-parse", "HEAD", check=False)
     remote = git(path, "remote", "get-url", "origin", check=False).stdout.strip()
     branch = git(path, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip()
-    dirty = bool(git(path, "status", "--porcelain", "--untracked-files=normal").stdout)
+    status = git(path, "status", "--porcelain", "--untracked-files=normal", check=False)
+    dirty = bool(status.stdout)
     item = {"url": remote, "branch": branch, "commit": head.stdout.strip() if head.returncode == 0 else None}
     issues = []
+    if status.returncode:
+        issues.append("Git worktree status unavailable (nested, incomplete, or corrupt repository)")
     if not external_url(remote):
         issues.append("no usable external origin")
     if not item["commit"]:
@@ -497,7 +500,13 @@ class Omago:
         repositories = {}
         ignored = set(self.machine.get("ignored_repos", []))
         for relative in discover_repos(self.home, self.settings, self.omit):
-            item, issues = repo_status(self.home / relative, verify=interactive)
+            try:
+                item, issues = repo_status(self.home / relative, verify=interactive)
+            except OmagoError as error:
+                # Repository discovery must not make --plan unusable. Record the
+                # path and continue; update can ask about it when interactive.
+                self.report["repository_issues"][relative] = [str(error)]
+                continue
             if relative in ignored:
                 self.report["repository_issues"][relative] = issues or ["explicitly omitted on this machine"]
                 continue
@@ -514,7 +523,10 @@ class Omago:
                 if action == "s":
                     ignored.add(relative)
                     continue
-                item, issues = repo_status(self.home / relative, verify=True)
+                try:
+                    item, issues = repo_status(self.home / relative, verify=True)
+                except OmagoError as error:
+                    raise OmagoError(f"Repository audit failed for {relative}: {error}") from error
                 if issues:
                     raise OmagoError(f"Repository remains unbacked: {relative}")
                 self.report["repository_issues"].pop(relative, None)

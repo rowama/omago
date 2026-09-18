@@ -332,6 +332,12 @@ class GitIntegrationTests(Fixture):
         _, issues = o.repo_status(workspace, verify=True)
         self.assertIn("uncommitted or untracked work", issues)
 
+    def test_incomplete_nested_repository_is_reported_not_fatal(self):
+        workspace = self.base / "broken"
+        (workspace / ".git").mkdir(parents=True)
+        item, issues = o.repo_status(workspace, verify=False)
+        self.assertIn("Git worktree status unavailable (nested, incomplete, or corrupt repository)", issues)
+
     def test_git_workspace_clone_and_fast_forward(self):
         source = self.base / "source"
         self.git(self.base, "clone", str(self.remote), str(source))
