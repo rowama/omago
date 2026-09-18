@@ -185,6 +185,8 @@ def excluded(path, settings):
         return "credential filename"
     if path.endswith((".bak", ".old", ".log", ".lock", "~")) or ".before-" in path:
         return "backup, runtime lock, or log"
+    # Package ownership alone never excludes user configuration under an
+    # included path; this narrow list protects credentials and runtime data.
     if len(parts) > 1 and parts[0] == ".config" and parts[1] in BLOCKED_CONFIG:
         return "sensitive, runtime, or platform-specific application data"
     if any(fnmatch.fnmatchcase(path, pat) for pat in HARDWARE_FILES):
@@ -210,6 +212,8 @@ def valid_link(relative, target, home):
 
 def file_entry(path, relative, home, settings):
     if path.is_symlink():
+        # The link is user state. Preserve it even if its package-owned target
+        # is absent on this machine; package installation can happen later.
         target = normalize_link(os.readlink(path), home)
         if not valid_link(relative, target, home):
             return None, "symlink points outside home or /usr/share"

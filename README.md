@@ -143,6 +143,16 @@ repository, Omago treats its ordinary files like any other included files; the
 history, remotes, and untracked work remain the responsibility of your normal
 Git workflow.
 
+User configuration is portable state by default. Files under the default
+`~/.config` include are captured even when an application package technically
+owns them; package ownership does not hide a changed user configuration file.
+Omago does not copy package defaults from `/usr/share` or other system paths.
+Package integrity can be checked independently with pacman. A user-created
+symlink is different: Omago captures the symlink itself, including a safe
+absolute link into `/usr/share`, and recreates it on another machine even when
+the target package has not been installed yet. The link may be dangling until
+the package is installed.
+
 Relative links within home and absolute links into home or `/usr/share` are
 preserved; other symlinks are omitted. Omago never follows a symlink parent to
 write files. Binary files are copied as-is; absolute paths inside binary data

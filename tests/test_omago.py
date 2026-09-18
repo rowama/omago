@@ -78,6 +78,21 @@ class CaptureTests(Fixture):
         with self.assertRaises(o.OmagoError):
             o.safe_destination(self.home, ".config/alias/sample")
 
+    def test_package_target_symlink_is_user_state_and_can_be_dangling(self):
+        (self.home / ".config").mkdir()
+        link = self.home / ".config/tool-defaults"
+        link.symlink_to("/usr/share/example-package/defaults.conf")
+        files, _, _ = self.scan()
+        self.assertEqual(files[".config/tool-defaults"]["kind"], "symlink")
+        self.assertEqual(files[".config/tool-defaults"]["target"], "/usr/share/example-package/defaults.conf")
+        other = self.base / "other-user"
+        other.mkdir()
+        self.app.home = other
+        self.app.apply_file(".config/tool-defaults", files[".config/tool-defaults"])
+        restored = other / ".config/tool-defaults"
+        self.assertTrue(restored.is_symlink())
+        self.assertEqual(os.readlink(restored), "/usr/share/example-package/defaults.conf")
+
     def test_hardware_package_exclusion(self):
         for name in ("linux", "linux-omarchy-headers", "nvidia-open", "intel-ucode", "vulkan-intel", "limine"):
             self.assertTrue(o.hardware_package(name), name)
