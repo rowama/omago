@@ -2,7 +2,7 @@
 
 Omago maintains a portable **engagement experience (EX)** across existing Omarchy
 machines. EX includes how humans and agents use the system: applications,
-configuration, launchers, skills, plugins, and externally backed Git workspaces.
+configuration, launchers, skills, plugins, and selected home-directory files.
 GitHub stores the desired EX; each machine retains its hardware setup and any
 exceptions you explicitly choose.
 
@@ -48,25 +48,15 @@ launcher default; the source executable also accepts `OMAGO_DIR`.
 ## First run: empty GitHub repository
 
 `omago --update` detects an empty remote, inventories portable packages and
-configuration, audits Git workspaces, and asks before publishing the initial
+configuration, and asks before publishing the initial
 snapshot. It writes an omissions report at `~/omago/report.json` for review.
 An existing nonempty repository without an Omago manifest is rejected.
-
-Every discovered Git workspace must have a valid external `origin`, a committed
-HEAD reachable from a freshly fetched remote branch, and no uncommitted or
-untracked work. If it does not, Omago asks you to fix it in another terminal and
-retry, explicitly omit it with a recorded gap, or stop. Omago never invents a
-repository name, commits arbitrary working files, or uploads unreviewed project
-content. To resolve an unbacked project, create an external repository, set its
-origin, review/commit the intended files, and push the branch. Then choose retry.
-Ignored files are not project backups: data, build outputs, and secrets outside
-Git remain your responsibility. Git submodules/LFS need their own setup.
 
 ## Subsequent runs and another machine
 
 Install Omago on the other Omarchy system and run the same command. It fetches
 and fast-forwards the EX checkout, installs missing applications, restores absent
-configuration, and clones missing repositories at the recorded commit.
+configuration.
 
 When a configuration file already exists and differs on a new machine, choose:
 
@@ -79,11 +69,7 @@ backup. Local edits and concurrent edits require a choice. File deletion require
 a choice; no package is uninstalled automatically. Extra local applications can
 be added to EX in a batch or selected individually. New local config files are
 offered by directory; their choices are separate from application membership.
-Existing Git repositories can publish their verified local revision or accept
-the desired revision via a safe fast-forward. Origin/branch changes, divergent
-history, and dirty workspaces require manual resolution or an explicit exception.
-
-Run `omago --reconsider` to clear remembered exceptions and ignored apps/repos,
+Run `omago --reconsider` to clear remembered exceptions and ignored apps,
 then `omago --update` to reconsider them. New files inside a locally excluded
 directory may prompt again; exceptions are stored per file.
 
@@ -105,7 +91,6 @@ take effect. Keep both machines on compatible Omarchy versions.
 | mise | Global configuration is captured; subsequent update offers `mise install` to restore declared tools |
 | Omarchy | Portable settings, custom plugin source, themes, hooks, launchers, terminal/editor settings |
 | Agents | Selected skills, commands, rules, settings, and available plugin manifests |
-| Git workspaces | Home-relative path, external origin, branch, verified commit; clones and safe updates |
 | Files | Contents, executable/permission bits, safe symlinks; home paths rewritten for the target user |
 
 Explicit Arch package membership is desired state, **not a version lock**.
@@ -143,13 +128,20 @@ plugin mechanism and authenticate on the target. Omago does not claim that an
 omitted item has been restored. Consult `report.json` on every migration.
 
 Edit `~/omago/settings.json` to add home-relative `include` paths or glob-style
-`exclude` rules, change the repository search roots, file size limit, remote,
+`exclude` rules, change the file size limit, remote,
 branch, or transport (`auto`, `ssh`, `https`). Include a specific path such as
 `Documents/Notes` rather than the entire home directory. Hard security/platform
 exclusions still apply to explicit includes. Settings are machine-local; copy
 your custom capture policy to other machines if you want them to discover the
 same additional files. Once a file is tracked in EX, it can be restored on other
 machines regardless of their include list.
+
+Omago does not manage project Git repositories. It does not discover, clone,
+verify, or synchronize them. If an explicitly included directory contains a Git
+repository, Omago treats its ordinary files like any other included files; the
+`.git` metadata directory remains excluded as runtime metadata. Project source,
+history, remotes, and untracked work remain the responsibility of your normal
+Git workflow.
 
 Relative links within home and absolute links into home or `/usr/share` are
 preserved; other symlinks are omitted. Omago never follows a symlink parent to
@@ -185,7 +177,7 @@ No option silently approves conflicts or deletions.
   report.json             omissions, backup gaps, inventory/plan
   backups/                original files before replacement/deletion
   state/                  Git checkout of rowama/omago-ex
-    manifest.json         desired package/file/repository state
+    manifest.json         desired package/file state
     objects/<sha256>       normalized file contents
 ```
 

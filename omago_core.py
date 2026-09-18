@@ -42,7 +42,6 @@ DEFAULTS = {
         ".claude/CLAUDE.md", ".claude/plugins/installed_plugins.json",
     ],
     "exclude": [],
-    "repository_roots": ["."],
     "max_file_bytes": 10 * 1024 * 1024,
 }
 # These are platform/driver choices, not portable application requests.
@@ -251,9 +250,6 @@ def scan_files(home, settings, omit=()):
             skipped[relative] = reason
             return
         if path.is_dir() and not path.is_symlink():
-            if (path / ".git").exists():
-                skipped[relative] = "Git repository: handled by repository manifest"
-                return
             try:
                 for child in sorted(path.iterdir()):
                     visit(child)
@@ -300,53 +296,6 @@ def package_inventory():
     return packages, sorted(p for p in explicit if hardware_package(p))
 
 
-def discover_repos(home, settings, omit=()):
-    found = []
-    omit = [Path(p).resolve() for p in omit]
-    for root in settings["repository_roots"]:
-        start = home if root == "." else home / str(safe_relative(root))
-        if start.is_symlink() or any(p.is_symlink() for p in start.parents if p.is_relative_to(home) and p != home):
-            continue
-        for directory, dirs, _ in os.walk(start, followlinks=False):
-            p = Path(directory)
-            dirs[:] = sorted(d for d in dirs if d not in JUNK_PARTS - {".git"}
-                             and d not in SECRET_PARTS and not (p / d).is_symlink()
-                             and not any(p / d == x or (p / d).is_relative_to(x) for x in omit))
-            if any(p == x or p.is_relative_to(x) for x in omit):
-                dirs[:] = []
-                continue
-            if (p / ".git").exists():
-                if p != home:
-                    found.append(p.relative_to(home).as_posix())
-                dirs[:] = []
-    return sorted(set(found))
-
-
-def repo_status(path, verify=False):
-    head = git(path, "rev-parse", "HEAD", check=False)
-    remote = git(path, "remote", "get-url", "origin", check=False).stdout.strip()
-    branch = git(path, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip()
-    status = git(path, "status", "--porcelain", "--untracked-files=normal", check=False)
-    dirty = bool(status.stdout)
-    item = {"url": remote, "branch": branch, "commit": head.stdout.strip() if head.returncode == 0 else None}
-    issues = []
-    if status.returncode:
-        issues.append("Git worktree status unavailable (nested, incomplete, or corrupt repository)")
-    if not external_url(remote):
-        issues.append("no usable external origin")
-    if not item["commit"]:
-        issues.append("no committed content")
-    if dirty:
-        issues.append("uncommitted or untracked work")
-    if verify and remote and external_url(remote) and item["commit"]:
-        fetched = git(path, "fetch", "--no-tags", "--prune", "origin",
-                      "+refs/heads/*:refs/remotes/origin/*", check=False)
-        backed = git(path, "branch", "-r", "--contains", item["commit"], check=False).stdout
-        if fetched.returncode or not any(line.strip().startswith("origin/") for line in backed.splitlines()):
-            issues.append("HEAD not verified on an external branch")
-    return item, issues
-
-
 def validate_manifest(state, repo, home, settings):
     if (repo / "manifest.json").is_symlink() or (repo / "objects").is_symlink():
         raise OmagoError("EX metadata must not be symlinked")
@@ -391,15 +340,6 @@ def validate_manifest(state, repo, home, settings):
                 raise OmagoError(f"Hardware package in portable EX: {name}")
             if provider.startswith("flatpak") and len(name.split("|")) != 3:
                 raise OmagoError("Invalid Flatpak reference")
-    for relative, item in state.get("repositories", {}).items():
-        safe_relative(relative)
-        if relative in state["files"] or any(relative.startswith(p + "/") or p.startswith(relative + "/") for p in state["files"]):
-            raise OmagoError("Repository and configuration destinations overlap")
-        if not external_url(item.get("url")) or not re.fullmatch("[a-f0-9]{40,64}", item.get("commit", "")):
-            raise OmagoError(f"Invalid repository entry: {relative}")
-        branch = item.get("branch", "")
-        if branch and (branch.startswith("-") or git(repo, "check-ref-format", "--branch", branch, check=False).returncode):
-            raise OmagoError("Invalid repository branch")
 
 
 class Omago:
@@ -409,8 +349,8 @@ class Omago:
         self.repo = self.root / "state"
         self.settings = read_json(self.root / "settings.json", DEFAULTS)
         self.settings = {**copy.deepcopy(DEFAULTS), **self.settings}
-        self.machine = read_json(self.root / "machine.json", {"files": {}, "keep": {}, "ignored_packages": {}, "ignored_repos": []})
-        self.report = {"schema": 1, "omitted": {}, "repository_issues": {}, "notes": []}
+        self.machine = read_json(self.root / "machine.json", {"files": {}, "keep": {}, "ignored_packages": {}})
+        self.report = {"schema": 1, "omitted": {}, "notes": []}
         self.stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.omit = [self.root, Path(__file__).resolve().parent]
 
@@ -485,7 +425,7 @@ class Omago:
             "Foreign pacman packages are AUR candidates: packages absent from AUR need a documented installation source.",
             "OS package versions are not pinned; targets need compatible, up-to-date Omarchy installations.",
         ]
-        return {"schema": 1, "packages": packages, "files": files, "repositories": {}}, blobs
+        return {"schema": 1, "packages": packages, "files": files}, blobs
 
     def capture_files(self):
         settings = copy.deepcopy(self.settings)
@@ -495,48 +435,6 @@ class Omago:
 
     def save_report(self):
         write_json(self.root / "report.json", self.report)
-
-    def audit_repos(self, desired=None, interactive=True):
-        repositories = {}
-        ignored = set(self.machine.get("ignored_repos", []))
-        for relative in discover_repos(self.home, self.settings, self.omit):
-            try:
-                item, issues = repo_status(self.home / relative, verify=interactive)
-            except OmagoError as error:
-                # Repository discovery must not make --plan unusable. Record the
-                # path and continue; update can ask about it when interactive.
-                self.report["repository_issues"][relative] = [str(error)]
-                continue
-            if relative in ignored:
-                self.report["repository_issues"][relative] = issues or ["explicitly omitted on this machine"]
-                continue
-            if not interactive:
-                self.report["repository_issues"][relative] = issues or ["remote reachability not checked by --plan"]
-                continue
-            if issues:
-                self.report["repository_issues"][relative] = issues
-                print(f"Repository {relative}: {', '.join(issues)}")
-                action = choose("Resolve backup before including this repository",
-                                {"r": "retry after you commit/push or configure origin", "s": "explicitly omit and record gap", "q": "stop"}, "q")
-                if action == "q":
-                    raise OmagoError("Repository backup unresolved; no EX snapshot published")
-                if action == "s":
-                    ignored.add(relative)
-                    continue
-                try:
-                    item, issues = repo_status(self.home / relative, verify=True)
-                except OmagoError as error:
-                    raise OmagoError(f"Repository audit failed for {relative}: {error}") from error
-                if issues:
-                    raise OmagoError(f"Repository remains unbacked: {relative}")
-                self.report["repository_issues"].pop(relative, None)
-            if desired is not None and relative not in desired:
-                if choose(f"Add local repository {relative} to shared EX?", {"a": "add", "k": "keep local"}, "k") == "k":
-                    ignored.add(relative)
-                    continue
-            repositories[relative] = item
-        self.machine["ignored_repos"] = sorted(ignored)
-        return repositories
 
     def store_blobs(self, blobs):
         for digest, data in blobs.items():
@@ -681,40 +579,6 @@ class Omago:
             desired[provider] = sorted(wanted)
             self.machine["ignored_packages"][provider] = sorted(ignored)
 
-    def restore_repos(self, desired, local):
-        for relative, item in sorted(desired.items()):
-            dest = self.home / relative
-            safe_destination(self.home, relative + "/.omago-check")
-            if any(dest == p or dest.is_relative_to(p) for p in self.omit):
-                raise OmagoError("Repository destination overlaps Omago")
-            if dest.is_symlink():
-                raise OmagoError(f"Repository destination is a symlink: {relative}")
-            if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                git(dest.parent, "clone", "--no-checkout", "--", item["url"], str(dest))
-                git(dest, "checkout", "--detach", item["commit"])
-                if item.get("branch"):
-                    git(dest, "checkout", "-B", item["branch"])
-                    git(dest, "branch", "--set-upstream-to", "origin/" + item["branch"], check=False)
-                print(f"Restored repository: {relative}")
-            elif relative in local and local[relative] != item:
-                action = choose(f"Repository revision or origin differs: {relative}",
-                                {"r": "use GitHub revision (fast-forward only)", "p": "publish verified local revision", "k": "keep local"}, "k")
-                if action == "p":
-                    desired[relative] = local[relative]
-                elif action == "r":
-                    if local[relative]["url"] != item["url"] or local[relative]["branch"] != item["branch"]:
-                        raise OmagoError(f"Repository origin/branch differs; reconcile manually: {relative}")
-                    git(dest, "fetch", "origin")
-                    if git(dest, "merge-base", "--is-ancestor", "HEAD", item["commit"], check=False).returncode:
-                        raise OmagoError(f"Repository would require a non-fast-forward change; reconcile manually: {relative}")
-                    git(dest, "merge", "--ff-only", item["commit"])
-                else:
-                    self.report["repository_issues"][relative] = ["local revision differs from EX"]
-            elif relative not in local:
-                self.report["repository_issues"][relative] = ["existing directory/repository left unchanged; inspect manually"]
-        desired.update({k: v for k, v in local.items() if k not in desired})
-
     def update(self):
         self.prepare()
         if not self.empty_remote:
@@ -723,10 +587,9 @@ class Omago:
         try:
             if self.empty_remote:
                 print("Empty EX repository: preparing this machine's initial portable state.")
-                local["repositories"] = self.audit_repos()
                 self.save_report()
-                print(f"Capture: {len(local['files'])} files, {sum(map(len, local['packages'].values()))} apps, "
-                      f"{len(local['repositories'])} verified repositories. Review {self.root / 'report.json'} for gaps.")
+                print(f"Capture: {len(local['files'])} files, {sum(map(len, local['packages'].values()))} apps. "
+                      f"Review {self.root / 'report.json'} for gaps.")
                 if choose("Publish this initial snapshot to " + self.settings["remote"] + "?",
                           {"y": "publish", "n": "stop for review"}, "n") != "y":
                     raise OmagoError("Initial capture not published")
@@ -740,8 +603,6 @@ class Omago:
                 local["files"], blobs, omitted = self.capture_files()
                 self.report["omitted"].update(omitted)
                 self.reconcile_files(desired["files"], local["files"], blobs)
-                repos = self.audit_repos(desired.get("repositories", {}))
-                self.restore_repos(desired.setdefault("repositories", {}), repos)
                 self.publish(desired, blobs)
                 if ".config/mise/config.toml" in desired["files"] and shutil.which("mise"):
                     if choose("Reconcile tools declared by mise? Review/trust its configuration first.",
@@ -763,7 +624,6 @@ class Omago:
 
     def plan(self):
         local, _ = self.inventory()
-        self.audit_repos(interactive=False)
         desired = read_json(self.repo / "manifest.json", {"files": {}, "packages": {}})
         differences = sorted(k for k in set(local["files"]) | set(desired["files"])
                              if local["files"].get(k) != desired["files"].get(k))
@@ -803,7 +663,7 @@ def main(argv=None):
             elif args.push:
                 app.push()
             else:
-                app.machine.update(keep={}, ignored_packages={}, ignored_repos=[])
+                app.machine.update(keep={}, ignored_packages={})
                 write_json(app.root / "machine.json", app.machine)
                 print("Local exceptions cleared. Run omago --update to reconsider them.")
         return 0

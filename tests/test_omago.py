@@ -19,7 +19,6 @@ class Fixture(unittest.TestCase):
         self.home = self.base / "home"
         self.home.mkdir()
         self.settings = copy.deepcopy(o.DEFAULTS)
-        self.settings["repository_roots"] = []
         self.settings["include"] = [".config", ".bashrc"]
         self.app = o.Omago(self.base / "runtime", self.home)
         self.app.settings = self.settings
@@ -85,12 +84,12 @@ class CaptureTests(Fixture):
         for name in ("nvim", "chromium", "hyprland", "omarchy", "python"):
             self.assertFalse(o.hardware_package(name), name)
 
-    def test_git_repository_contents_not_copied(self):
+    def test_git_metadata_is_excluded_but_included_project_files_are_captured(self):
         self.put(".config/plugin/.git/HEAD", "ref: refs/heads/main")
         self.put(".config/plugin/code.py", "print('x')")
         files, _, skipped = self.scan()
-        self.assertFalse(files)
-        self.assertIn(".config/plugin", skipped)
+        self.assertIn(".config/plugin/code.py", files)
+        self.assertNotIn(".config/plugin/.git/HEAD", files)
 
     def test_omago_path_symlink_excluded(self):
         self.settings["include"].append(".local/bin")
@@ -194,7 +193,7 @@ class ManifestTests(Fixture):
         self.put(".bashrc", "echo example")
         files, blobs, _ = self.scan()
         self.app.store_blobs(blobs)
-        return {"schema": 1, "files": files, "packages": {}, "repositories": {}}
+        return {"schema": 1, "files": files, "packages": {}}
 
     def test_traversal_and_tampered_object(self):
         m = self.manifest()
@@ -219,11 +218,6 @@ class ManifestTests(Fixture):
         m["files"]["dir/file"] = m["files"][".bashrc"]
         with self.assertRaises(o.OmagoError):
             o.validate_manifest(m, self.app.repo, self.home, self.settings)
-        m = self.manifest()
-        m["repositories"][".bashrc/child"] = {"url": "git@github.com:user/repo.git", "commit": "a" * 40}
-        with self.assertRaises(o.OmagoError):
-            o.validate_manifest(m, self.app.repo, self.home, self.settings)
-
     def test_safe_remote_urls(self):
         self.assertTrue(o.external_url("git@github.com:rowama/omago-ex.git"))
         self.assertTrue(o.external_url("https://git.example.org/team/repo.git"))
@@ -316,51 +310,6 @@ class GitIntegrationTests(Fixture):
         with self.assertRaisesRegex(o.OmagoError, "Uncommitted"):
             a.prepare()
         self.assertEqual((a.repo / "unexpected").read_text(), "keep this")
-
-    def test_repository_backup_audit_detects_unpushed_and_dirty_work(self):
-        workspace = self.base / "workspace"
-        self.git(self.base, "clone", str(self.remote), str(workspace))
-        (workspace / "code").write_text("initial")
-        self.git(workspace, "add", ".")
-        self.git(workspace, "commit", "-m", "initial")
-        _, issues = o.repo_status(workspace, verify=True)
-        self.assertIn("HEAD not verified on an external branch", issues)
-        self.git(workspace, "push", "origin", "main")
-        _, issues = o.repo_status(workspace, verify=True)
-        self.assertEqual(issues, [])
-        (workspace / "code").write_text("dirty")
-        _, issues = o.repo_status(workspace, verify=True)
-        self.assertIn("uncommitted or untracked work", issues)
-
-    def test_incomplete_nested_repository_is_reported_not_fatal(self):
-        workspace = self.base / "broken"
-        (workspace / ".git").mkdir(parents=True)
-        item, issues = o.repo_status(workspace, verify=False)
-        self.assertIn("Git worktree status unavailable (nested, incomplete, or corrupt repository)", issues)
-
-    def test_git_workspace_clone_and_fast_forward(self):
-        source = self.base / "source"
-        self.git(self.base, "clone", str(self.remote), str(source))
-        (source / "file").write_text("first")
-        self.git(source, "add", ".")
-        self.git(source, "commit", "-m", "first")
-        self.git(source, "push", "origin", "main")
-        item, issues = o.repo_status(source, verify=True)
-        self.assertFalse(issues)
-        app = self.app_for("target")
-        desired = {"Projects/demo": item}
-        app.restore_repos(desired, {})
-        dest = app.home / "Projects/demo"
-        self.assertEqual((dest / "file").read_text(), "first")
-        old, _ = o.repo_status(dest, verify=True)
-        (source / "file").write_text("second")
-        self.git(source, "add", ".")
-        self.git(source, "commit", "-m", "second")
-        self.git(source, "push", "origin", "main")
-        item, issues = o.repo_status(source, verify=True)
-        with patch.object(o, "choose", return_value="r"):
-            app.restore_repos({"Projects/demo": item}, {"Projects/demo": old})
-        self.assertEqual((dest / "file").read_text(), "second")
 
     def test_tracked_opt_in_path_is_inventoried_on_target(self):
         app = self.app_for("target")
